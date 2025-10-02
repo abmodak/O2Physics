@@ -93,6 +93,17 @@ static constexpr std::string_view kEvntType[] = {"SE/", "ME/"};
 auto static constexpr kMinFt0cCell = 96;
 AxisSpec axisEvent{10, 0.5, 9.5, "#Event", "EventAxis"};
 
+namespace o2::aod
+{
+namespace longrangemultclass
+{
+DECLARE_SOA_COLUMN(Multiplicity, multiplicity, float); //! Centrality/multiplicity value
+} // namespace longrangemultclass
+DECLARE_SOA_TABLE(LRMultTables, "AOD", "LRMULTTABLE", longrangemultclass::Multiplicity); //! Transient multiplicity table
+
+using LRMultTable = LRMultTables::iterator;
+} // namespace o2::aod
+
 struct LongrangeCorrelation {
 
   struct : ConfigurableGroup {
@@ -794,7 +805,77 @@ struct LongrangeCorrelation {
   PROCESS_SWITCH(LongrangeCorrelation, processFt0aFt0cME, "mixed event FT0a vs FT0c", false);
 };
 
+struct MultiplicityClassifier {
+  Produces<aod::LRMultTables> multvalue;
+  Configurable<float> cfgEtaCut{"cfgEtaCut", 0.8f, "Eta range to consider"};
+  Configurable<float> dcaZ{"dcaZ", 0.2f, "Custom DCA Z cut (ignored if negative)"};
+  Configurable<float> cfgPtCutMin{"cfgPtCutMin", 0.2f, "minimum accepted track pT"};
+  Configurable<float> cfgPtCutMax{"cfgPtCutMax", 3.0f, "maximum accepted track pT"};
+
+  Filter fTrackSelectionITS = ncheckbit(aod::track::v001::detectorMap, (uint8_t)o2::aod::track::ITS) &&
+                              ncheckbit(aod::track::trackCutFlag, TrackSelectionIts);
+  Filter fTrackSelectionTPC = ifnode(ncheckbit(aod::track::v001::detectorMap, (uint8_t)o2::aod::track::TPC),
+                                     ncheckbit(aod::track::trackCutFlag, TrackSelectionTpc), true);
+  Filter fTrackSelectionDCA = ifnode(dcaZ.node() > 0.f, nabs(aod::track::dcaZ) <= dcaZ && ncheckbit(aod::track::trackCutFlag, TrackSelectionDcaxyOnly),
+                                     ncheckbit(aod::track::trackCutFlag, TrackSelectionDca));
+  Filter fTracksEta = nabs(aod::track::eta) < cfgEtaCut;
+  Filter fTracksPt = (aod::track::pt > cfgPtCutMin) && (aod::track::pt < cfgPtCutMax);
+
+  void init(InitContext const&)
+  {
+    int enabledFunctions = 0;
+    if (doprocessTracks) {
+      enabledFunctions++;
+    }
+    if (doprocessFT0C) {
+      enabledFunctions++;
+    }
+    if (doprocessFV0A) {
+      enabledFunctions++;
+    }
+    if (doprocessFT0M) {
+      enabledFunctions++;
+    }
+    if (enabledFunctions != 1) {
+      LOGP(fatal, "{} multiplicity classifier enabled but we need exactly 1.", enabledFunctions);
+    }
+  }
+
+  void processTracks(aod::Collision const&, soa::Filtered<soa::Join<aod::Tracks, aod::TracksExtra, aod::TracksDCA, aod::TrackSelection>> const& tracks)
+  {
+    multvalue(tracks.size());
+  }
+
+  void processFT0C(aod::CentFT0Cs const& centralities)
+  {
+    for (auto& c : centralities) {
+      multvalue(c.centFT0C());
+    }
+  }
+
+  void processFV0A(aod::CentFV0As const& centralities)
+  {
+    for (auto& c : centralities) {
+      multvalue(c.centFV0A());
+    }
+  }
+
+  void processFT0M(aod::CentFT0Ms const& centralities)
+  {
+    for (auto& c : centralities) {
+      multvalue(c.centFT0M());
+    }
+  }
+
+  PROCESS_SWITCH(MultiplicityClassifier, processTracks, "Select track count as multiplicity", false);
+  PROCESS_SWITCH(MultiplicityClassifier, processFT0C, "Select FT0C centrality as multiplicity", false);
+  PROCESS_SWITCH(MultiplicityClassifier, processFV0A, "Select FV0A centrality as multiplicity", false);
+  PROCESS_SWITCH(MultiplicityClassifier, processFT0M, "Select FT0M centrality as multiplicity", false);
+};
+
 WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
 {
-  return WorkflowSpec{adaptAnalysisTask<LongrangeCorrelation>(cfgc)};
+  return WorkflowSpec{
+    adaptAnalysisTask<LongrangeCorrelation>(cfgc),
+    adaptAnalysisTask<MultiplicityClassifier>(cfgc)};
 }
