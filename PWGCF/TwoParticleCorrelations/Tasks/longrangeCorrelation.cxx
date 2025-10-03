@@ -44,11 +44,13 @@
 #include "Framework/HistogramRegistry.h"
 #include "Framework/StepTHn.h"
 #include "Framework/runDataProcessing.h"
+#include "Framework/O2DatabasePDGPlugin.h"
 #include "ReconstructionDataFormats/Track.h"
 
 #include <TComplex.h>
 #include <TH1F.h>
 #include <TMath.h>
+#include <TPDGCode.h>
 
 #include <chrono>
 #include <cstdio>
@@ -88,10 +90,23 @@ enum KindOfCorrType {
   kFT0AFT0C
 };
 
+enum {
+  kSpeciesbegin = 0,
+  kSpPion = 1,
+  kSpKaon,
+  kSpProton,
+  kBkg,
+  kSpNotPrimary,
+  kSpAll,
+  kSpeciesend
+};
+
 static constexpr std::string_view kCorrType[] = {"Ft0aGlobal/", "Ft0cGlobal/", "MftGlobal/", "Ft0aMft/", "Ft0aFt0c/"};
 static constexpr std::string_view kEvntType[] = {"SE/", "ME/"};
 auto static constexpr kMinFt0cCell = 96;
+auto static constexpr kMinCharge = 3.f;
 AxisSpec axisEvent{10, 0.5, 9.5, "#Event", "EventAxis"};
+AxisSpec axisSpecies = {kSpeciesend - 1, +kSpeciesbegin + 0.5, +kSpeciesend - 0.5, "", "SpeciesAxis"};
 
 namespace o2::aod
 {
@@ -113,7 +128,9 @@ struct LongrangeCorrelation {
 
   SliceCache cache;
   Service<o2::ccdb::BasicCCDBManager> ccdb;
+  Service<o2::framework::O2DatabasePDG> pdg;
   o2::ccdb::CcdbApi ccdbApi;
+  o2::ft0::Geometry ft0Det;
   std::vector<o2::detectors::AlignParam>* offsetFT0;
   HistogramRegistry histos{"histos", {}, OutputObjHandlingPolicy::AnalysisObject};
   Configurable<float> cfgVtxCut{"cfgVtxCut", 10.0f, "Vertex Z range to consider"};
@@ -153,10 +170,12 @@ struct LongrangeCorrelation {
   using CollTable = soa::Join<aod::Collisions, aod::EvSels, aod::LRMultTables>;
   using TrksTable = soa::Filtered<soa::Join<aod::Tracks, aod::TracksExtra, aod::TracksDCA, aod::TrackSelection>>;
   using MftTrkTable = soa::Filtered<aod::MFTTracks>;
+  using CollTableMC = soa::SmallGroups<soa::Join<aod::McCollisionLabels, aod::Collisions, aod::EvSels, aod::LRMultTables>>;
+  using TrksTableMC = soa::Filtered<soa::Join<aod::Tracks, aod::TracksExtra, aod::TracksDCA, aod::McTrackLabels, aod::TrackSelection>>;                         
   Preslice<TrksTable> perColGlobal = aod::track::collisionId;
+  Preslice<TrksTableMC> perColMC = aod::track::collisionId;
   Preslice<MftTrkTable> perColMft = aod::fwdtrack::collisionId;
-  o2::ft0::Geometry ft0Det;
-
+  
   OutputObj<CorrelationContainer> sameFt0aGlobal{Form("sameEventFt0aGlobal_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult))};
   OutputObj<CorrelationContainer> mixedFt0aGlobal{Form("mixedEventFt0aGlobal_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult))};
   OutputObj<CorrelationContainer> sameFt0cGlobal{Form("sameEventFt0cGlobal_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult))};
@@ -255,6 +274,11 @@ struct LongrangeCorrelation {
       addHistos<kFT0AFT0C, kME>();
       sameFt0aFt0c.setObject(new CorrelationContainer(Form("sameEventFt0aFt0c_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult)), Form("sameEventFt0aFt0c_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult)), corrAxis, effAxis, userAxis));
       mixedFt0aFt0c.setObject(new CorrelationContainer(Form("mixedEventFt0aFt0c_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult)), Form("mixedEventFt0aFt0c_%i_%i", static_cast<int>(cfgMinMult), static_cast<int>(cfgMaxMult)), corrAxis, effAxis, userAxis));
+    }
+    
+    if (doprocessEff) {
+      histos.add("hmcgendndpt", "hmcgendndpt", kTHnSparseD, {axisEtaTrig, axisPtTrigger, axisSpecies, axisMultiplicity, axisVtxZ}, false);
+      histos.add("hmcrecdndpt", "hmcrecdndpt", kTHnSparseD, {axisEtaTrig, axisPtTrigger, axisSpecies, axisMultiplicity, axisVtxZ}, false);
     }
   }
 
@@ -800,6 +824,106 @@ struct LongrangeCorrelation {
     }
   } // mixed event
 
+  template <typename CheckGenTrack>
+  bool isGenTrackSelected(CheckGenTrack const& track)
+  {
+    if (!track.isPhysicalPrimary()) {
+      return false;
+    }
+    if (!track.producedByGenerator()) {
+      return false;
+    }
+    auto pdgTrack = pdg->GetParticle(track.pdgCode());
+    if (pdgTrack == nullptr) {
+      return false;
+    }
+    if (std::abs(pdgTrack->Charge()) < kMinCharge) {
+      return false;
+    }
+    if (std::abs(track.eta()) >= cfgEtaCut) {
+      return false;
+    }
+    return true;
+  }
+  
+  void processEff(aod::McCollisions::iterator const& mcCollision, CollTableMC const& RecCols, aod::McParticles const& GenParticles, TrksTableMC const& RecTracks)
+  {
+    if (std::abs(mcCollision.posZ()) >= cfgVtxCut) {
+      return;
+    }
+
+    auto multiplicity = -999.;
+    auto numcontributors = -999;
+    for (const auto& RecCol : RecCols) {
+      if (!isEventSelected(RecCol)) {
+        continue;
+      }
+      if (RecCol.numContrib() <= numcontributors) {
+        continue;
+      } else {
+        numcontributors = RecCol.numContrib();
+      }
+      multiplicity = RecCol.multiplicity();
+    }
+
+    for (const auto& particle : GenParticles) {
+      if (!isGenTrackSelected(particle)) {
+        continue;
+      }
+      histos.fill(HIST("hmcgendndpt"), particle.eta(), particle.pt(), static_cast<double>(kSpAll), multiplicity, mcCollision.posZ());
+      int pid = 0;
+      switch (std::abs(particle.pdgCode())) {
+        case PDG_t::kPiPlus:
+          pid = kSpPion;
+          break;
+        case PDG_t::kKPlus:
+          pid = kSpKaon;
+          break;
+        case PDG_t::kProton:
+          pid = kSpProton;
+          break;
+      }
+      histos.fill(HIST("hmcgendndpt"), particle.eta(), particle.pt(), static_cast<double>(pid), multiplicity, mcCollision.posZ());
+    } // track (mcgen) loop
+
+    for (const auto& RecCol : RecCols) {
+      if (!isEventSelected(RecCol)) {
+        continue;
+      }
+      auto recTracksPart = RecTracks.sliceBy(perColMC, RecCol.globalIndex());
+      std::vector<int> mclabels;
+      for (const auto& Rectrack : recTracksPart) {
+        if (Rectrack.has_mcParticle()) {
+          int pid = kBkg;
+          auto mcpart = Rectrack.template mcParticle_as<aod::McParticles>();
+          if (mcpart.isPhysicalPrimary()) {
+            histos.fill(HIST("hmcrecdndpt"), mcpart.eta(), mcpart.pt(), static_cast<double>(kSpAll), multiplicity, mcCollision.posZ());
+            switch (std::abs(mcpart.pdgCode())) {
+              case PDG_t::kPiPlus:
+                pid = kSpPion;
+                break;
+              case PDG_t::kKPlus:
+                pid = kSpKaon;
+                break;
+              case PDG_t::kProton:
+                pid = kSpProton;
+                break;
+            }
+          } else {
+            pid = kSpNotPrimary;
+          }
+          if (find(mclabels.begin(), mclabels.end(), Rectrack.mcParticleId()) != mclabels.end()) {
+            pid = kBkg;
+          }
+          mclabels.push_back(Rectrack.mcParticleId());
+          histos.fill(HIST("hmcrecdndpt"), mcpart.eta(), mcpart.pt(), static_cast<double>(pid), multiplicity, mcCollision.posZ());
+        } else {
+          histos.fill(HIST("hmcrecdndpt"), Rectrack.eta(), Rectrack.pt(), static_cast<double>(kBkg), multiplicity, mcCollision.posZ());
+        }
+      } // track (mcrec) loop
+    } // rec collision
+  }
+
   PROCESS_SWITCH(LongrangeCorrelation, processEventStat, "event stat", false);
   PROCESS_SWITCH(LongrangeCorrelation, processFt0aGlobalSE, "same event FT0a vs global", false);
   PROCESS_SWITCH(LongrangeCorrelation, processFt0aGlobalME, "mixed event FT0a vs global", false);
@@ -811,6 +935,7 @@ struct LongrangeCorrelation {
   PROCESS_SWITCH(LongrangeCorrelation, processFt0aMftME, "mixed event FT0a vs MFT", false);
   PROCESS_SWITCH(LongrangeCorrelation, processFt0aFt0cSE, "same event FT0a vs FT0c", false);
   PROCESS_SWITCH(LongrangeCorrelation, processFt0aFt0cME, "mixed event FT0a vs FT0c", false);
+  PROCESS_SWITCH(LongrangeCorrelation, processEff, "Estimate efficiency", false);
 };
 
 struct MultiplicityClassifier {
