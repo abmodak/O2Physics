@@ -150,7 +150,7 @@ struct LongrangeCorrelation {
   ConfigurableAxis amplitudeFt0a{"amplitudeFt0a", {5000, 0, 10000}, "FT0A amplitude"};
   ConfigurableAxis channelFt0aAxis{"channelFt0aAxis", {96, 0.0, 96.0}, "FT0A channel"};
 
-  using CollTable = soa::Join<aod::Collisions, aod::EvSels>;
+  using CollTable = soa::Join<aod::Collisions, aod::EvSels, aod::LRMultTables>;
   using TrksTable = soa::Filtered<soa::Join<aod::Tracks, aod::TracksExtra, aod::TracksDCA, aod::TrackSelection>>;
   using MftTrkTable = soa::Filtered<aod::MFTTracks>;
   Preslice<TrksTable> perColGlobal = aod::track::collisionId;
@@ -336,11 +336,11 @@ struct LongrangeCorrelation {
   }
 
   template <CorrelationContainer::CFStep step, typename TTarget, typename TTriggers, typename TFT0s>
-  void fillCorrFt0aGlobal(TTarget target, TTriggers const& triggers, TFT0s const& ft0, bool mixing, float vz)
+  void fillCorrFt0aGlobal(TTarget target, TTriggers const& triggers, TFT0s const& ft0, bool mixing, float vz, float multiplicity)
   {
     int fSampleIndex = gRandom->Uniform(0, cfgSampleSize);
     if (!mixing)
-      histos.fill(HIST("Ft0aGlobal/SE/hMult_used"), triggers.size());
+      histos.fill(HIST("Ft0aGlobal/SE/hMult_used"), multiplicity);
     for (auto const& triggerTrack : triggers) {
       if (!mixing)
         histos.fill(HIST("Ft0aGlobal/SE/Trig_hist"), fSampleIndex, vz, triggerTrack.pt());
@@ -378,11 +378,11 @@ struct LongrangeCorrelation {
   } // fillCorrFt0aGlobal
 
   template <CorrelationContainer::CFStep step, typename TTarget, typename TTriggers, typename TFT0s>
-  void fillCorrFt0cGlobal(TTarget target, TTriggers const& triggers, TFT0s const& ft0, bool mixing, float vz)
+  void fillCorrFt0cGlobal(TTarget target, TTriggers const& triggers, TFT0s const& ft0, bool mixing, float vz, float multiplicity)
   {
     int fSampleIndex = gRandom->Uniform(0, cfgSampleSize);
     if (!mixing)
-      histos.fill(HIST("Ft0cGlobal/SE/hMult_used"), triggers.size());
+      histos.fill(HIST("Ft0cGlobal/SE/hMult_used"), multiplicity);
     for (auto const& triggerTrack : triggers) {
       if (!mixing)
         histos.fill(HIST("Ft0cGlobal/SE/Trig_hist"), fSampleIndex, vz, triggerTrack.pt());
@@ -420,11 +420,11 @@ struct LongrangeCorrelation {
   } // fillCorrFt0cGlobal
 
   template <CorrelationContainer::CFStep step, typename TTarget, typename TTriggers, typename TMFTs>
-  void fillCorrMftGlobal(TTarget target, TTriggers const& triggers, TMFTs const& mft, bool mixing, float vz)
+  void fillCorrMftGlobal(TTarget target, TTriggers const& triggers, TMFTs const& mft, bool mixing, float vz, float multiplicity)
   {
     int fSampleIndex = gRandom->Uniform(0, cfgSampleSize);
     if (!mixing)
-      histos.fill(HIST("MftGlobal/SE/hMult_used"), triggers.size());
+      histos.fill(HIST("MftGlobal/SE/hMult_used"), multiplicity);
     for (auto const& triggerTrack : triggers) {
       if (!mixing)
         histos.fill(HIST("MftGlobal/SE/Trig_hist"), fSampleIndex, vz, triggerTrack.pt());
@@ -455,12 +455,12 @@ struct LongrangeCorrelation {
     } // trigger tracks
   } // fillCorrMftGlobal
 
-  template <CorrelationContainer::CFStep step, typename TTarget, typename TTracks, typename TTriggers, typename TFT0s>
-  void fillCorrFt0aMft(TTarget target, TTracks const& tracks, TTriggers const& triggers, TFT0s const& ft0, bool mixing, float vz)
+  template <CorrelationContainer::CFStep step, typename TTarget, typename TTriggers, typename TFT0s>
+  void fillCorrFt0aMft(TTarget target, TTriggers const& triggers, TFT0s const& ft0, bool mixing, float vz, float multiplicity)
   {
     int fSampleIndex = gRandom->Uniform(0, cfgSampleSize);
     if (!mixing)
-      histos.fill(HIST("Ft0aMft/SE/hMult_used"), tracks.size());
+      histos.fill(HIST("Ft0aMft/SE/hMult_used"), multiplicity);
     for (auto const& triggerTrack : triggers) {
       if (!isMftTrackSelected(triggerTrack)) {
         continue;
@@ -504,12 +504,12 @@ struct LongrangeCorrelation {
     } // trigger tracks
   } // fillCorrFt0aMft
 
-  template <CorrelationContainer::CFStep step, typename TTarget, typename TTriggers, typename TFT0As, typename TFT0Cs>
-  void fillCorrFt0aFt0c(TTarget target, TTriggers const& triggers, TFT0As const& ft0a, TFT0Cs const& ft0c, bool mixing, float vz)
+  template <CorrelationContainer::CFStep step, typename TTarget, typename TFT0As, typename TFT0Cs>
+  void fillCorrFt0aFt0c(TTarget target, TFT0As const& ft0a, TFT0Cs const& ft0c, bool mixing, float vz, float multiplicity)
   {
     int fSampleIndex = gRandom->Uniform(0, cfgSampleSize);
     if (!mixing)
-      histos.fill(HIST("Ft0aFt0c/SE/hMult_used"), triggers.size());
+      histos.fill(HIST("Ft0aFt0c/SE/hMult_used"), multiplicity);
 
     for (std::size_t iChA = 0; iChA < ft0a.channelA().size(); iChA++) {
       if (!mixing)
@@ -592,10 +592,11 @@ struct LongrangeCorrelation {
     if (col.has_foundFT0()) {
       fillYield<kFT0AGLOBAL, kSE>(tracks);
       const auto& ft0 = col.foundFT0();
-      if (tracks.size() < cfgMinMult || tracks.size() >= cfgMaxMult) {
+      auto multiplicity = col.multiplicity();
+      if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
         return;
       }
-      fillCorrFt0aGlobal<CorrelationContainer::kCFStepReconstructed>(sameFt0aGlobal, tracks, ft0, false, col.posZ());
+      fillCorrFt0aGlobal<CorrelationContainer::kCFStepReconstructed>(sameFt0aGlobal, tracks, ft0, false, col.posZ(), multiplicity);
     }
   } // same event
 
@@ -607,10 +608,11 @@ struct LongrangeCorrelation {
     if (col.has_foundFT0()) {
       fillYield<kFT0CGLOBAL, kSE>(tracks);
       const auto& ft0 = col.foundFT0();
-      if (tracks.size() < cfgMinMult || tracks.size() >= cfgMaxMult) {
+      auto multiplicity = col.multiplicity();
+      if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
         return;
       }
-      fillCorrFt0cGlobal<CorrelationContainer::kCFStepReconstructed>(sameFt0cGlobal, tracks, ft0, false, col.posZ());
+      fillCorrFt0cGlobal<CorrelationContainer::kCFStepReconstructed>(sameFt0cGlobal, tracks, ft0, false, col.posZ(), multiplicity);
     }
   } // same event
 
@@ -620,13 +622,14 @@ struct LongrangeCorrelation {
       return;
     }
     fillYield<kMFTGLOBAL, kSE>(tracks);
-    if (tracks.size() < cfgMinMult || tracks.size() >= cfgMaxMult) {
+    auto multiplicity = col.multiplicity();
+    if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
       return;
     }
-    fillCorrMftGlobal<CorrelationContainer::kCFStepReconstructed>(sameMftGlobal, tracks, mfttracks, false, col.posZ());
+    fillCorrMftGlobal<CorrelationContainer::kCFStepReconstructed>(sameMftGlobal, tracks, mfttracks, false, col.posZ(), multiplicity);
   } // same event
 
-  void processFt0aMftSE(CollTable::iterator const& col, aod::FT0s const&, TrksTable const& tracks, MftTrkTable const& mfttracks)
+  void processFt0aMftSE(CollTable::iterator const& col, aod::FT0s const&, MftTrkTable const& mfttracks)
   {
     if (!isEventSelected(col)) {
       return;
@@ -634,25 +637,27 @@ struct LongrangeCorrelation {
     if (col.has_foundFT0()) {
       fillYield<kFT0AMFT, kSE>(mfttracks);
       const auto& ft0 = col.foundFT0();
-      if (tracks.size() < cfgMinMult || tracks.size() >= cfgMaxMult) {
+      auto multiplicity = col.multiplicity();
+      if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
         return;
       }
-      fillCorrFt0aMft<CorrelationContainer::kCFStepReconstructed>(sameFt0aMft, tracks, mfttracks, ft0, false, col.posZ());
+      fillCorrFt0aMft<CorrelationContainer::kCFStepReconstructed>(sameFt0aMft, mfttracks, ft0, false, col.posZ(), multiplicity);
     }
   } // same event
 
-  void processFt0aFt0cSE(CollTable::iterator const& col, aod::FT0s const&, TrksTable const& tracks)
+  void processFt0aFt0cSE(CollTable::iterator const& col, aod::FT0s const&)
   {
     if (!isEventSelected(col)) {
       return;
     }
     if (col.has_foundFT0()) {
-      histos.fill(HIST("Ft0aFt0c/SE/hMult"), tracks.size());
+      auto multiplicity = col.multiplicity();
+      histos.fill(HIST("Ft0aFt0c/SE/hMult"), multiplicity);
       const auto& ft0 = col.foundFT0();
-      if (tracks.size() < cfgMinMult || tracks.size() >= cfgMaxMult) {
+      if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
         return;
       }
-      fillCorrFt0aFt0c<CorrelationContainer::kCFStepReconstructed>(sameFt0aFt0c, tracks, ft0, ft0, false, col.posZ());
+      fillCorrFt0aFt0c<CorrelationContainer::kCFStepReconstructed>(sameFt0aFt0c, ft0, ft0, false, col.posZ(), multiplicity);
     }
   } // same event
 
@@ -676,10 +681,11 @@ struct LongrangeCorrelation {
         auto slicedTriggerTracks = tracks.sliceBy(perColGlobal, col1.globalIndex());
         fillYield<kFT0AGLOBAL, kME>(slicedTriggerTracks);
         const auto& ft0 = col2.foundFT0();
-        if (slicedTriggerTracks.size() < cfgMinMult || slicedTriggerTracks.size() >= cfgMaxMult) {
+        auto multiplicity = col1.multiplicity();
+        if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
           continue;
         }
-        fillCorrFt0aGlobal<CorrelationContainer::kCFStepReconstructed>(mixedFt0aGlobal, slicedTriggerTracks, ft0, true, col1.posZ());
+        fillCorrFt0aGlobal<CorrelationContainer::kCFStepReconstructed>(mixedFt0aGlobal, slicedTriggerTracks, ft0, true, col1.posZ(), multiplicity);
       }
     }
   } // mixed event
@@ -704,10 +710,11 @@ struct LongrangeCorrelation {
         auto slicedTriggerTracks = tracks.sliceBy(perColGlobal, col1.globalIndex());
         fillYield<kFT0CGLOBAL, kME>(slicedTriggerTracks);
         const auto& ft0 = col2.foundFT0();
-        if (slicedTriggerTracks.size() < cfgMinMult || slicedTriggerTracks.size() >= cfgMaxMult) {
+        auto multiplicity = col1.multiplicity();
+        if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
           continue;
         }
-        fillCorrFt0cGlobal<CorrelationContainer::kCFStepReconstructed>(mixedFt0cGlobal, slicedTriggerTracks, ft0, true, col1.posZ());
+        fillCorrFt0cGlobal<CorrelationContainer::kCFStepReconstructed>(mixedFt0cGlobal, slicedTriggerTracks, ft0, true, col1.posZ(), multiplicity);
       }
     }
   } // mixed event
@@ -727,10 +734,11 @@ struct LongrangeCorrelation {
       if (!isEventSelected(col1) || !isEventSelected(col2)) {
         continue;
       }
-      if ((tracks1.size() < cfgMinMult || tracks1.size() >= cfgMaxMult)) {
+      auto multiplicity = col1.multiplicity();
+      if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
         continue;
       }
-      fillCorrMftGlobal<CorrelationContainer::kCFStepReconstructed>(mixedMftGlobal, tracks1, tracks2, true, col1.posZ());
+      fillCorrMftGlobal<CorrelationContainer::kCFStepReconstructed>(mixedMftGlobal, tracks1, tracks2, true, col1.posZ(), multiplicity);
     }
   } // mixed event
 
@@ -751,14 +759,14 @@ struct LongrangeCorrelation {
         continue;
       }
       if (col1.has_foundFT0() && col2.has_foundFT0()) {
-        auto slicedGlobalTracks = tracks.sliceBy(perColGlobal, col1.globalIndex());
         auto slicedTriggerMftTracks = mfttracks.sliceBy(perColMft, col1.globalIndex());
         fillYield<kFT0AMFT, kME>(slicedTriggerMftTracks);
         const auto& ft0 = col2.foundFT0();
-        if (slicedGlobalTracks.size() < cfgMinMult || slicedGlobalTracks.size() >= cfgMaxMult) {
+        auto multiplicity = col1.multiplicity();
+        if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
           continue;
         }
-        fillCorrFt0aMft<CorrelationContainer::kCFStepReconstructed>(mixedFt0aMft, slicedGlobalTracks, slicedTriggerMftTracks, ft0, true, col1.posZ());
+        fillCorrFt0aMft<CorrelationContainer::kCFStepReconstructed>(mixedFt0aMft, slicedTriggerMftTracks, ft0, true, col1.posZ(), multiplicity);
       }
     }
   } // mixed event
@@ -780,14 +788,14 @@ struct LongrangeCorrelation {
         continue;
       }
       if (col1.has_foundFT0() && col2.has_foundFT0()) {
-        auto slicedTriggerTracks = tracks.sliceBy(perColGlobal, col1.globalIndex());
-        histos.fill(HIST("Ft0aFt0c/ME/hMult"), slicedTriggerTracks.size());
+        auto multiplicity = col1.multiplicity();
+        histos.fill(HIST("Ft0aFt0c/ME/hMult"), multiplicity);
         const auto& ft0a = col1.foundFT0();
         const auto& ft0c = col2.foundFT0();
-        if (slicedTriggerTracks.size() < cfgMinMult || slicedTriggerTracks.size() >= cfgMaxMult) {
+        if (multiplicity < cfgMinMult || multiplicity >= cfgMaxMult) {
           continue;
         }
-        fillCorrFt0aFt0c<CorrelationContainer::kCFStepReconstructed>(mixedFt0aFt0c, slicedTriggerTracks, ft0a, ft0c, true, col1.posZ());
+        fillCorrFt0aFt0c<CorrelationContainer::kCFStepReconstructed>(mixedFt0aFt0c, ft0a, ft0c, true, col1.posZ(), multiplicity);
       }
     }
   } // mixed event
