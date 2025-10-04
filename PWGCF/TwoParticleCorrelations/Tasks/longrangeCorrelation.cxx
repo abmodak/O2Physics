@@ -981,21 +981,21 @@ struct MultiplicityClassifier {
 
   void processFT0C(aod::CentFT0Cs const& centralities)
   {
-    for (auto& c : centralities) {
+    for (auto const& c : centralities) {
       multvalue(c.centFT0C());
     }
   }
 
   void processFV0A(aod::CentFV0As const& centralities)
   {
-    for (auto& c : centralities) {
+    for (auto const& c : centralities) {
       multvalue(c.centFV0A());
     }
   }
 
   void processFT0M(aod::CentFT0Ms const& centralities)
   {
-    for (auto& c : centralities) {
+    for (auto const& c : centralities) {
       multvalue(c.centFT0M());
     }
   }
