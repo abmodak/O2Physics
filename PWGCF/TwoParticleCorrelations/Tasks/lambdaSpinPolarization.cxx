@@ -1543,9 +1543,12 @@ struct LambdaSpinPolarization {
   Configurable<int> cNPhiBins{"cNPhiBins", 36, "N Phi Bins"};
   Configurable<int> cNBinsCosTS{"cNBinsCosTS", 10, "N CosTS Bins"};
   Configurable<bool> cInvBoostFlag{"cInvBoostFlag", true, "Inverse Boost Flag"};
+  Configurable<int> mixingParameter{"mixingParameter", 5, "how many events are mixed"};
 
   // Centrality Axis
   ConfigurableAxis cMultBins{"cMultBins", {VARIABLE_WIDTH, 0.0f, 10.0f, 30.0f, 50.f, 80.0f, 100.f}, "Variable Mult-Bins"};
+  ConfigurableAxis axisMultME{"axisMultME", {VARIABLE_WIDTH, 0, 5, 10, 20, 30, 40, 50, 1000}, "Mixing bins - multiplicity"};
+  ConfigurableAxis axisVtxZME{"axisVtxZME", {VARIABLE_WIDTH, -10, -8, -6, -4, -2, 0, 2, 4, 6, 8, 10}, "Mixing bins - z-vertex"};
 
   // Histogram Registry.
   HistogramRegistry histos{"histos", {}, OutputObjHandlingPolicy::AnalysisObject};
@@ -1690,6 +1693,29 @@ struct LambdaSpinPolarization {
   }
 
   PROCESS_SWITCH(LambdaSpinPolarization, processDataReco, "Process for Data and MCReco", true);
+
+  void processDataRecoMixed(LambdaCollisions const& col, LambdaTracks const& tracks)
+  {
+    auto getMultiplicity = [this](auto& col) {
+      (void)this;
+      return col.cent();
+    };
+    
+    using MixedBinning = FlexibleBinningPolicy<std::tuple<decltype(getMultiplicity)>, aod::lambdacollision::PosZ, decltype(getMultiplicity)>;
+    MixedBinning binningOnVtxAndMult{{getMultiplicity}, {axisVtxZME, axisMultME}, true};
+    for (auto const& [col1, col2] : soa::selfCombinations(binningOnVtxAndMult, mixingParameter, -1, col, col)) {
+      if (col1.globalIndex() == col2.globalIndex()) {
+        continue;
+      }
+      auto lambdaTracks = partLambdaTracks->sliceByCached(aod::lambdatrack::lambdaCollisionId, col1.globalIndex(), cache);
+      auto antiLambdaTracks = partAntiLambdaTracks->sliceByCached(aod::lambdatrack::lambdaCollisionId, col2.globalIndex(), cache);
+      analyzePairs<kLambdaAntiLambda, false>(lambdaTracks, antiLambdaTracks);
+      analyzePairs<kLambdaLambda, true>(lambdaTracks, lambdaTracks);
+      analyzePairs<kAntiLambdaAntiLambda, true>(antiLambdaTracks, antiLambdaTracks);
+    }
+  }
+
+  PROCESS_SWITCH(LambdaSpinPolarization, processDataRecoMixed, "Process for Data and MCReco for Mixed events", true);
 
   void processDataRecoMixEvent(LambdaCollisions::iterator const& collision, LambdaTracks const& tracks)
   {
