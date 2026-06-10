@@ -19,8 +19,15 @@
 #include "PWGCF/TwoParticleCorrelations/DataModel/LongRangeDerived.h"
 #include "PWGUD/Core/SGSelector.h"
 
+#include "Common/CCDB/EventSelectionParams.h"
 #include "Common/Core/RecoDecay.h"
+#include "Common/Core/TrackSelection.h"
+#include "Common/Core/TrackSelectionDefaults.h"
+#include "Common/DataModel/EventSelection.h"
+#include "Common/DataModel/McCollisionExtra.h"
+#include "Common/DataModel/TrackSelectionTables.h"
 
+#include <CCDB/BasicCCDBManager.h>
 #include <CommonConstants/MathConstants.h>
 #include <Framework/AnalysisDataModel.h>
 #include <Framework/AnalysisHelpers.h>
@@ -31,6 +38,7 @@
 #include <Framework/HistogramRegistry.h>
 #include <Framework/HistogramSpec.h>
 #include <Framework/InitContext.h>
+#include <Framework/O2DatabasePDGPlugin.h>
 #include <Framework/OutputObjHeader.h>
 #include <Framework/runDataProcessing.h>
 
@@ -51,11 +59,16 @@ using namespace o2::aod::fwdtrack;
 using namespace o2::aod::evsel;
 using namespace o2::constants::math;
 
+auto static constexpr KminCharge = 3.0f;
+
 struct LongrangecorrDerived {
 
   SliceCache cache;
   SGSelector sgSelector;
   HistogramRegistry histos{"histos", {}, OutputObjHandlingPolicy::AnalysisObject};
+  TrackSelection myTrackFilter;
+  Service<o2::framework::O2DatabasePDG> pdg;
+  Service<o2::ccdb::BasicCCDBManager> ccdb;
 
   struct : ConfigurableGroup {
     Configurable<int> cfgNmixedevent{"cfgNmixedevent", 5, "how many events are mixed"};
@@ -66,10 +79,16 @@ struct LongrangecorrDerived {
     Configurable<bool> isUseCentEst{"isUseCentEst", false, "Centrality based classification"};
     Configurable<int> isUseDataLikeMult{"isUseDataLikeMult", 0, "Data like mult/cent classification"};
 
+    Configurable<float> cfgEtaCut{"cfgEtaCut", 0.8f, "Eta range to consider"};
+    Configurable<float> cfgPtCutMin{"cfgPtCutMin", 0.2f, "minimum accepted track pT"};
+    Configurable<float> cfgPtCutMax{"cfgPtCutMax", 10.0f, "maximum accepted track pT"};
     Configurable<float> cfgTpcMinNclsFound{"cfgTpcMinNclsFound", 50.0f, ""};
     Configurable<float> cfgTpcMinNCrossedRows{"cfgTpcMinNCrossedRows", 70.0f, ""};
     Configurable<float> cfgTpcMaxChi2PerCluster{"cfgTpcMaxChi2PerCluster", 4.0f, ""};
     Configurable<float> cfgTpcMaxDcaZ{"cfgTpcMaxDcaZ", 1.0f, ""};
+    Configurable<float> cfgLowEffCut{"cfgLowEffCut", 0.001f, "Low efficiency cut"};
+    Configurable<bool> applyEffCorr{"applyEffCorr", true, "Enable efficiency correction"};
+    Configurable<std::string> cfgEffccdbPath{"cfgEffccdbPath", "/alice/data/CCDB/Users/a/abmodak/OO/Efficiency", "Browse track eff object from CCDB"};
 
     Configurable<int> cfgMftCluster{"cfgMftCluster", 5, "cut on MFT Cluster"};
     Configurable<float> cfgMftDcaxy{"cfgMftDcaxy", 2.0f, "cut on DCA xy for MFT tracks"};
@@ -120,6 +139,10 @@ struct LongrangecorrDerived {
 
   OutputObj<CorrelationContainer> same{"sameEvent"};
   OutputObj<CorrelationContainer> mixed{"mixedEvent"};
+
+  // corrections
+  TH3D* hTrkEff = nullptr;
+  bool fLoadTrkEffCorr = false;
 
   using CollsTable = aod::LRCollisions;
   using TrksTable = aod::LRMidTracks;
@@ -211,6 +234,52 @@ struct LongrangecorrDerived {
 
     histos.add("ReassignedMFTtrackAmbDegree", "ReassignedMFTtrackAmbDegree", kTH1D, {cfgAxis.axisMFTAmbDegree});
     histos.add("AssignedMFTtrackAmbDegree", "AssignedMFTtrackAmbDegree", kTH1D, {cfgAxis.axisMFTAmbDegree});
+
+    if (doprocessTPCtrackEff) {
+      histos.add("hGenMCdndpt", "hGenMCdndpt", kTH3D, {cfgAxis.axisVtxZ, cfgAxis.axisEtaEfficiency, cfgAxis.axisPtEfficiency});
+      histos.add("hRecMCdndpt", "hRecMCdndpt", kTH3D, {cfgAxis.axisVtxZ, cfgAxis.axisEtaEfficiency, cfgAxis.axisPtEfficiency});
+    }
+
+    myTrackFilter = getGlobalTrackSelectionRun3ITSMatch(TrackSelection::GlobalTrackRun3ITSMatching::Run3ITSibAny,
+                                                        TrackSelection::GlobalTrackRun3DCAxyCut::Default);
+    myTrackFilter.SetPtRange(cfgSel.cfgPtCutMin, cfgSel.cfgPtCutMax);
+    myTrackFilter.SetEtaRange(-cfgSel.cfgEtaCut, cfgSel.cfgEtaCut);
+    myTrackFilter.SetMinNCrossedRowsTPC(cfgSel.cfgTpcMinNCrossedRows);
+    myTrackFilter.SetMinNClustersTPC(cfgSel.cfgTpcMinNclsFound);
+    myTrackFilter.SetMaxChi2PerClusterTPC(cfgSel.cfgTpcMaxChi2PerCluster);
+    myTrackFilter.SetMaxDcaZ(cfgSel.cfgTpcMaxDcaZ);
+    myTrackFilter.print();
+  }
+
+  void loadEffCorrection(uint64_t timestamp)
+  {
+    if (fLoadTrkEffCorr) {
+      return;
+    }
+    if (cfgSel.cfgEffccdbPath.value.empty() == false) {
+      hTrkEff = ccdb->getForTimeStamp<TH3D>(cfgSel.cfgEffccdbPath, timestamp);
+      if (hTrkEff == nullptr) {
+        LOGF(fatal, "Could not load efficiency histogram for trigger particles from %s", cfgSel.cfgEffccdbPath.value.c_str());
+      }
+      LOGF(info, "Loaded efficiency histogram from %s (%p)", cfgSel.cfgEffccdbPath.value.c_str(), (void*)hTrkEff);
+    }
+    fLoadTrkEffCorr = true;
+  }
+
+  float getTrkEffCorr(float posZ, float eta, float pt)
+  {
+    float eff = 1.0f;
+    if (hTrkEff) {
+      int zBin = hTrkEff->GetXaxis()->FindBin(posZ);
+      int etaBin = hTrkEff->GetYaxis()->FindBin(eta);
+      int ptBin = hTrkEff->GetZaxis()->FindBin(pt);
+      eff = hTrkEff->GetBinContent(zBin, etaBin, ptBin);
+    } else {
+      eff = 1.0f;
+    }
+    if (eff < cfgSel.cfgLowEffCut)
+      eff = 1.0;
+    return eff;
   }
 
   template <typename TTrack>
@@ -336,6 +405,7 @@ struct LongrangecorrDerived {
     int fSampleIndex = gRandom->Uniform(0, cfgSel.cfgSampleSize);
     for (auto const& triggerTrack : triggers) {
       auto trigAmpl = 1.0f;
+      auto trkeff = 1.0f;
       if constexpr (requires { triggerTrack.channelID(); }) {
         trigAmpl = triggerTrack.amplitude();
       } else {
@@ -352,14 +422,21 @@ struct LongrangecorrDerived {
         if (cfgSel.cfgV0Mask != 0 && (cfgSel.cfgV0Mask & (1u << static_cast<uint32_t>(triggerTrack.v0Type()))) == 0u)
           continue;
       }
+
+      if constexpr (requires { triggerTrack.trackType(); }) {
+        trkeff = getTrkEffCorr(vz, triggerTrack.eta(), triggerTrack.pt());
+      } else {
+        trkeff = 1.0;
+      }
+
       if (!mixing) {
         fillTrigTrackQA(triggerTrack);
         if constexpr (requires { triggerTrack.channelID(); }) {
-          histos.fill(HIST("Trig_hist"), fSampleIndex, vz, multiplicity, 1.0, 1.0, eventWeight * trigAmpl);
+          histos.fill(HIST("Trig_hist"), fSampleIndex, vz, multiplicity, 1.0, 1.0, eventWeight * trigAmpl * trkeff);
         } else if constexpr (requires { triggerTrack.invMass(); }) {
-          histos.fill(HIST("Trig_hist"), fSampleIndex, vz, multiplicity, triggerTrack.pt(), triggerTrack.invMass(), eventWeight * trigAmpl);
+          histos.fill(HIST("Trig_hist"), fSampleIndex, vz, multiplicity, triggerTrack.pt(), triggerTrack.invMass(), eventWeight * trigAmpl * trkeff);
         } else {
-          histos.fill(HIST("Trig_hist"), fSampleIndex, vz, multiplicity, triggerTrack.pt(), 1.0, eventWeight * trigAmpl);
+          histos.fill(HIST("Trig_hist"), fSampleIndex, vz, multiplicity, triggerTrack.pt(), 1.0, eventWeight * trigAmpl * trkeff);
         }
       }
       for (auto const& assoTrack : assocs) {
@@ -377,16 +454,16 @@ struct LongrangecorrDerived {
         float deltaEta = triggerTrack.eta() - assoTrack.eta();
         if (!mixing) {
           fillAssocTrackQA(assoTrack);
-          histos.fill(HIST("deltaEta_deltaPhi_same"), deltaPhi, deltaEta, eventWeight * trigAmpl * assoAmpl);
+          histos.fill(HIST("deltaEta_deltaPhi_same"), deltaPhi, deltaEta, eventWeight * trigAmpl * assoAmpl * trkeff);
         } else {
-          histos.fill(HIST("deltaEta_deltaPhi_mixed"), deltaPhi, deltaEta, eventWeight * trigAmpl * assoAmpl);
+          histos.fill(HIST("deltaEta_deltaPhi_mixed"), deltaPhi, deltaEta, eventWeight * trigAmpl * assoAmpl * trkeff);
         }
         if constexpr (requires { triggerTrack.channelID(); }) {
-          target->getPairHist()->Fill(step, fSampleIndex, vz, multiplicity, 1.0, deltaPhi, deltaEta, 1.0, eventWeight * trigAmpl * assoAmpl);
+          target->getPairHist()->Fill(step, fSampleIndex, vz, multiplicity, 1.0, deltaPhi, deltaEta, 1.0, eventWeight * trigAmpl * assoAmpl * trkeff);
         } else if constexpr (requires { triggerTrack.invMass(); }) {
-          target->getPairHist()->Fill(step, fSampleIndex, vz, multiplicity, triggerTrack.pt(), deltaPhi, deltaEta, triggerTrack.invMass(), eventWeight * trigAmpl * assoAmpl);
+          target->getPairHist()->Fill(step, fSampleIndex, vz, multiplicity, triggerTrack.pt(), deltaPhi, deltaEta, triggerTrack.invMass(), eventWeight * trigAmpl * assoAmpl * trkeff);
         } else {
-          target->getPairHist()->Fill(step, fSampleIndex, vz, multiplicity, triggerTrack.pt(), deltaPhi, deltaEta, 1.0, eventWeight * trigAmpl * assoAmpl);
+          target->getPairHist()->Fill(step, fSampleIndex, vz, multiplicity, triggerTrack.pt(), deltaPhi, deltaEta, 1.0, eventWeight * trigAmpl * assoAmpl * trkeff);
         }
       } // associated tracks
     } // trigger tracks
@@ -782,6 +859,87 @@ struct LongrangecorrDerived {
     processMcGenMixed(mccollisions, ft0as, ft0cs);
   }
 
+  using ColMCTrueTable = soa::Join<aod::McCollisions, aod::McCollsExtra>;
+  using ColMCRecTable = soa::SmallGroups<soa::Join<aod::McCollisionLabels, aod::Collisions, aod::EvSels>>;
+  using TrksMCRecTable = soa::Filtered<soa::Join<aod::Tracks, aod::TracksExtra, aod::TracksDCA, aod::McTrackLabels, aod::TrackSelection>>;
+  Preslice<TrksMCRecTable> perColMidtrack = aod::track::collisionId;
+
+  template <typename CheckCol>
+  bool isEventSelected(CheckCol const& col)
+  {
+    if (!col.sel8())
+      return false;
+    if (!col.selection_bit(o2::aod::evsel::kNoSameBunchPileup))
+      return false;
+    if (!col.selection_bit(o2::aod::evsel::kIsGoodZvtxFT0vsPV))
+      return false;
+    if (!col.selection_bit(o2::aod::evsel::kIsGoodITSLayersAll))
+      return false;
+    if (std::abs(col.posZ()) >= cfgSel.cfgVtxCut)
+      return false;
+    return true;
+  }
+
+  template <typename CheckGenPart>
+  bool isGenPartSelected(CheckGenPart const& particle)
+  {
+    if (!particle.isPhysicalPrimary() || !particle.producedByGenerator())
+      return false;
+    auto pdgParticle = pdg->GetParticle(particle.pdgCode());
+    if (pdgParticle == nullptr)
+      return false;
+    if (std::abs(pdgParticle->Charge()) < KminCharge)
+      return false;
+    return true;
+  }
+
+  void processTPCtrackEff(ColMCTrueTable::iterator const& mcCollision, ColMCRecTable const& RecCols,
+                          TrksMCRecTable const& RecTracks, aod::McParticles const& mcparticles)
+  {
+    if (std::abs(mcCollision.posZ()) >= cfgSel.cfgVtxCut) {
+      return;
+    }
+    bool atLeastOne = false;
+    for (const auto& RecCol : RecCols) {
+      if (!isEventSelected(RecCol))
+        continue;
+      if (RecCol.globalIndex() != mcCollision.bestCollisionIndex())
+        continue;
+      auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
+      atLeastOne = true;
+    }
+    for (const auto& particle : mcparticles) {
+      if (!isGenPartSelected(particle) ||
+          std::abs(particle.eta()) > cfgSel.cfgEtaCut ||
+          particle.pt() < cfgSel.cfgPtCutMin ||
+          particle.pt() > cfgSel.cfgPtCutMax)
+        continue;
+      if (atLeastOne)
+        histos.fill(HIST("hGenMCdndpt"), mcCollision.posZ(), particle.eta(), particle.pt());
+    }
+    for (const auto& RecCol : RecCols) {
+      if (!isEventSelected(RecCol))
+        continue;
+      if (RecCol.globalIndex() != mcCollision.bestCollisionIndex())
+        continue;
+      auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
+      for (const auto& track : recTracksPart) {
+        if (!track.isGlobalTrack())
+          continue;
+        if (!myTrackFilter.IsSelected(track))
+          continue;
+        if (!track.has_mcParticle())
+          continue;
+        auto particle = track.mcParticle();
+        if (RecCol.mcCollisionId() != particle.mcCollisionId())
+          continue;
+        if (particle.isPhysicalPrimary()) {
+          histos.fill(HIST("hRecMCdndpt"), mcCollision.posZ(), particle.eta(), particle.pt());
+        }
+      }
+    }
+  }
+
   PROCESS_SWITCH(LongrangecorrDerived, processTpcft0aSE, "same event TPC vs FT0A", false);
   PROCESS_SWITCH(LongrangecorrDerived, processTpcft0aME, "mixed event TPC vs FT0A", false);
   PROCESS_SWITCH(LongrangecorrDerived, processTpcft0cSE, "same event TPC vs FT0C", false);
@@ -828,6 +986,7 @@ struct LongrangecorrDerived {
   PROCESS_SWITCH(LongrangecorrDerived, processMcGenMftft0aME, "mixed MC gen event MFT vs FT0A", false);
   PROCESS_SWITCH(LongrangecorrDerived, processMcGenFt0aft0cSE, "same MC gen event FT0A vs FT0C", false);
   PROCESS_SWITCH(LongrangecorrDerived, processMcGenFt0aft0cME, "mixed MC gen event FT0A vs FT0C", false);
+  PROCESS_SWITCH(LongrangecorrDerived, processTPCtrackEff, "process TPC track efficiency", false);
 };
 
 WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
