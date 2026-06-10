@@ -86,8 +86,6 @@ auto static constexpr TotFt0Channels = 208;
 AxisSpec axisEvent{20, 0.5, 20.5, "#Event", "EventAxis"};
 AxisSpec axisTrackSel{10, 0.5, 10.5, "#Track", "TrackAxis"};
 auto static constexpr KminCharge = 3.0f;
-static constexpr std::string_view species[] = {"Pi", "Ka", "Pr"};
-static constexpr std::array<int, 3> speciesIds{kPiPlus, kKPlus, kProton};
 
 enum KindOfV0 {
   kLambda = 0,
@@ -128,7 +126,6 @@ struct LongrangeMaker {
   } cfgevtsel;
 
   struct : ConfigurableGroup {
-    Configurable<int> cfgItsPattern{"cfgItsPattern", 1, "0 = Run3ITSibAny, 1 = Run3ITSallAny, 2 = Run3ITSall7Layers, 3 = Run3ITSibTwo"};
     Configurable<float> cfgEtaCut{"cfgEtaCut", 0.8f, "Eta range to consider"};
     Configurable<float> cfgPtCutMin{"cfgPtCutMin", 0.2f, "minimum accepted track pT"};
     Configurable<float> cfgPtCutMax{"cfgPtCutMax", 10.0f, "maximum accepted track pT"};
@@ -140,12 +137,13 @@ struct LongrangeMaker {
     Configurable<float> maxChi2PerClusterITS{"maxChi2PerClusterITS", 36.f, "cut on maximum value of ITS chi2 per cluster"};
     Configurable<float> maxDcaZ{"maxDcaZ", 2.0f, "cut on maximum abs value of DCA z"};
     Configurable<float> maxDcaXY{"maxDcaXY", 1.0f, "cut on maximum abs value of DCA xy"};
+    Configurable<float> cfgLowEffCut{"cfgLowEffCut", 0.001f, "Low efficiency cut"};
+    Configurable<bool> applyEffCorr{"applyEffCorr", true, "Enable efficiency correction"};
+    Configurable<std::string> cfgEffccdbPath{"cfgEffccdbPath", "/alice/data/CCDB/Users/a/abmodak/OO/Efficiency", "Browse track eff object from CCDB"};
   } cfgtrksel;
 
   struct : ConfigurableGroup {
     Configurable<bool> cfgUseChi2Cut{"cfgUseChi2Cut", false, "Use condition on MFT track: chi2/Nclusters"};
-    Configurable<bool> cfgRequireCA{"cfgRequireCA", false, "Use Cellular Automaton track-finding algorithm"};
-    Configurable<bool> cfgRequireLTF{"cfgRequireLTF", false, "Use LTF track-finding algorithm"};
     Configurable<bool> useMftPtCut{"useMftPtCut", true, "Choose to apply MFT track pT cut"};
     Configurable<int> cfgMftCluster{"cfgMftCluster", 5, "cut on MFT Cluster"};
     Configurable<float> cfgMftEtaMax{"cfgMftEtaMax", -2.4f, "Maximum MFT eta cut"};
@@ -195,11 +193,6 @@ struct LongrangeMaker {
   } cfgv0trksel;
 
   struct : ConfigurableGroup {
-    ConfigurableAxis axisVtx = {"axisVtx", {20, -10, 10}, "Vertex axis"};
-    ConfigurableAxis axisMult = {"axisMult", {100, 0, 100}, "Multiplicity axis"};
-    ConfigurableAxis axisEta = {"axisEta", {20, -1, 1}, "eta axis"};
-    ConfigurableAxis axisPt = {"axisPt", {10, 0, 10}, "pT axis"};
-    ConfigurableAxis axisSpecies = {"axisSpecies", {4, 0.5, 4.5}, "Species axis"};
     ConfigurableAxis axisAmplitude{"axisAmplitude", {5000, 0, 10000}, "FT0 amplitude"};
     ConfigurableAxis axisChannel{"axisChannel", {208, 0, 208}, "FT0 channel"};
     ConfigurableAxis axisMFTAmbDegree{"axisMFTAmbDegree", {50, -0.5, 49.5}, "Track Ambiguity axis"};
@@ -232,6 +225,10 @@ struct LongrangeMaker {
   Configurable<SGCutParHolder> sgCuts{"sgCuts", {}, "SG event cuts"};
   Configurable<int> cfgGapSide{"cfgGapSide", 2, "cut on UPC events"};
 
+  // corrections
+  TH3D* hTrkEff = nullptr;
+  bool fLoadTrkEffCorr = false;
+
   void init(InitContext&)
   {
     ccdb->setURL(cfgCcdbParam.cfgURL);
@@ -261,7 +258,8 @@ struct LongrangeMaker {
     x->SetBinLabel(12, "ApplyNoCollInTimeRangeStrict");
     x->SetBinLabel(13, "ApplyNoHighMultCollInPrevRof");
     x->SetBinLabel(14, "ApplyOccupancySelection");
-    x->SetBinLabel(15, "reject flange event");
+    x->SetBinLabel(15, "ZvertexSelection");
+    x->SetBinLabel(16, "reject flange event");
     histos.add("hSelectionResult", "hSelectionResult", kTH1I, {{5, -0.5, 4.5}});
 
     histos.add("hMftTrkSel", "hMftTrkSel", kTH1D, {axisTrackSel}, false);
@@ -293,22 +291,8 @@ struct LongrangeMaker {
     histos.add("FT0C_Channel_vs_Amp", "FT0C_Channel_vs_Amp", kTH2D, {cfgAxis.axisChannel, cfgAxis.axisAmplitude});
     histos.add("FT0C_Channel_vs_Amp_gaincorrected", "FT0C_Channel_vs_Amp_gaincorrected", kTH2D, {cfgAxis.axisChannel, cfgAxis.axisAmplitude});
 
-    if (doprocessTPCtrackEff || doprocessMFTtrackEff) {
-      histos.add("hGenMCdndpt", "hGenMCdndpt", kTHnSparseD, {cfgAxis.axisVtx, cfgAxis.axisMult, cfgAxis.axisEta, cfgAxis.axisPt, cfgAxis.axisSpecies}, false);
-      histos.add("hRecMCdndpt", "hRecMCdndpt", kTHnSparseD, {cfgAxis.axisVtx, cfgAxis.axisMult, cfgAxis.axisEta, cfgAxis.axisPt, cfgAxis.axisSpecies}, false);
-      auto hGenSpecies = histos.get<THnSparse>(HIST("hGenMCdndpt"));
-      auto hRecSpecies = histos.get<THnSparse>(HIST("hRecMCdndpt"));
-      auto* axisGen = hGenSpecies->GetAxis(4);
-      auto* axisRec = hRecSpecies->GetAxis(4);
-      for (auto i = 0U; i < speciesIds.size(); ++i) {
-        axisGen->SetBinLabel(i + 1, species[i].data());
-        axisRec->SetBinLabel(i + 1, species[i].data());
-      }
-      axisGen->SetBinLabel(4, "Other");
-      axisRec->SetBinLabel(4, "Other");
-    }
-
-    myTrackFilter = getGlobalTrackSelectionRun3ITSMatch(cfgtrksel.cfgItsPattern, TrackSelection::GlobalTrackRun3DCAxyCut::Default);
+    myTrackFilter = getGlobalTrackSelectionRun3ITSMatch(TrackSelection::GlobalTrackRun3ITSMatching::Run3ITSibAny,
+                                                        TrackSelection::GlobalTrackRun3DCAxyCut::Default);
     myTrackFilter.SetPtRange(cfgtrksel.cfgPtCutMin, cfgtrksel.cfgPtCutMax);
     myTrackFilter.SetEtaRange(-cfgtrksel.cfgEtaCut, cfgtrksel.cfgEtaCut);
     myTrackFilter.SetMinNCrossedRowsTPC(cfgtrksel.minNCrossedRowsTPC);
@@ -368,9 +352,8 @@ struct LongrangeMaker {
     if (!isEventSelected(col)) {
       return;
     }
-    auto multiplicity = countNTracks(tracks);
-    auto centrality = selColCent(col);
     auto bc = col.bc_as<aod::BCsWithTimestamps>();
+    loadEffCorrection(bc.timestamp());
     // retrieve FT0 gain info from CCDB
     ft0gainvalues.clear();
     ft0gainvalues = {};
@@ -388,6 +371,8 @@ struct LongrangeMaker {
         ft0gainvalues.push_back(1.);
       }
     }
+    auto multiplicity = countNTracks(tracks, col.posZ());
+    auto centrality = selColCent(col);
     lrcollision(bc.runNumber(), col.posZ(), multiplicity, centrality, bc.timestamp());
 
     // track loop
@@ -430,7 +415,7 @@ struct LongrangeMaker {
           return;
         }
       }
-      histos.fill(HIST("EventHist"), 15);
+      histos.fill(HIST("EventHist"), 16);
       for (std::size_t iCh = 0; iCh < ft0.channelA().size(); iCh++) {
         auto chanelid = ft0.channelA()[iCh];
         float ampl = ft0.amplitudeA()[iCh];
@@ -566,6 +551,7 @@ struct LongrangeMaker {
     }
 
     auto bc = col.template foundBC_as<BCs>();
+    loadEffCorrection(bc.timestamp());
     auto newbc = bc;
     // obtain slice of compatible BCs
     auto bcRange = udhelpers::compatibleBCs(col, cfgSgCuts.NDtcoll(), bcs, cfgSgCuts.minNBCs());
@@ -581,7 +567,7 @@ struct LongrangeMaker {
 
       upchelpers::FITInfo fitInfo{};
       udhelpers::getFITinfo(fitInfo, newbc, bcs, ft0s, fv0as, fdds);
-      auto multiplicity = countNTracks(tracks);
+      auto multiplicity = countNTracks(tracks, col.posZ());
       upclrcollision(bc.globalBC(), bc.runNumber(), col.posZ(), multiplicity, fitInfo.ampFT0A, fitInfo.ampFT0C, fitInfo.timeFV0A);
       upcsglrcollision(issgevent);
       if (newbc.has_zdc()) {
@@ -753,10 +739,8 @@ struct LongrangeMaker {
       if (cfgevtsel.isApplyBestCollIndex && RecCol.globalIndex() != mcCollision.bestCollisionIndex()) {
         continue;
       }
-      auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
-      auto multiplicity = countNTracks(recTracksPart);
-      auto centrality = selColCent(RecCol);
       auto bc = RecCol.bc_as<aod::BCsWithTimestamps>();
+      loadEffCorrection(bc.timestamp());
       ft0gainvalues.clear();
       ft0gainvalues = {};
       if (cfgfittrksel.useGainCalib) {
@@ -773,6 +757,9 @@ struct LongrangeMaker {
           ft0gainvalues.push_back(1.);
         }
       }
+      auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
+      auto multiplicity = countNTracks(recTracksPart, RecCol.posZ());
+      auto centrality = selColCent(RecCol);
       lrcollision(bc.runNumber(), RecCol.posZ(), multiplicity, centrality, bc.timestamp());
       lrcollisionMcLabel(RecCol.mcCollisionId());
 
@@ -895,15 +882,22 @@ struct LongrangeMaker {
     }
   }
 
-  void processMCGen(ColMCTrueTable::iterator const& mcCollision, aod::McParticles const& mcparticles)
+  void processMCGen(aod::McCollisions::iterator const& mcCollision, aod::McParticles const& mcparticles)
   {
     auto multiplicity = 0;
+    auto multMCFT0A = 0;
+    auto multMCFT0C = 0;
     for (const auto& particle : mcparticles) {
-      if (!isGenPartSelected(particle) || std::abs(particle.eta()) > cfgtrksel.cfgEtaCut || particle.pt() < cfgtrksel.cfgPtCutMin || particle.pt() > cfgtrksel.cfgPtCutMult)
+      if (!isGenPartSelected(particle))
         continue;
-      multiplicity++;
+      if (std::abs(particle.eta()) < cfgtrksel.cfgEtaCut && particle.pt() > cfgtrksel.cfgPtCutMin && particle.pt() < cfgtrksel.cfgPtCutMult)
+        multiplicity++;
+      if (cfgfittrksel.cfgFt0cEtaMin < particle.eta() && particle.eta() < cfgfittrksel.cfgFt0cEtaMax)
+        multMCFT0C++;
+      if (cfgfittrksel.cfgFt0aEtaMin < particle.eta() && particle.eta() < cfgfittrksel.cfgFt0aEtaMax)
+        multMCFT0A++;
     }
-    lrmccollision(mcCollision.posZ(), multiplicity, mcCollision.multMCFT0A(), mcCollision.multMCFT0C());
+    lrmccollision(mcCollision.posZ(), multiplicity, multMCFT0A, multMCFT0C);
 
     for (const auto& particle : mcparticles) {
       if (!isGenPartSelected(particle)) {
@@ -920,125 +914,6 @@ struct LongrangeMaker {
       // Fill MFT tracks
       if (cfgmfttrksel.cfgMftEtaMin < particle.eta() && particle.eta() < cfgmfttrksel.cfgMftEtaMax && particle.pt() > cfgmfttrksel.cfgMftPtCutMin && particle.pt() < cfgmfttrksel.cfgMftPtCutMax)
         lrmftmctracks(lrmccollision.lastIndex(), particle.pt(), particle.eta(), particle.phi());
-    }
-  }
-
-  void processTPCtrackEff(ColMCTrueTable::iterator const& mcCollision, ColMCRecTable const& RecCols,
-                          TrksMCRecTable const& RecTracks, aod::McParticles const& mcparticles)
-  {
-    if (std::abs(mcCollision.posZ()) >= cfgevtsel.cfgVtxCut) {
-      return;
-    }
-    auto multiplicity = 0;
-    bool atLeastOne = false;
-    for (const auto& RecCol : RecCols) {
-      if (!isEventSelected(RecCol))
-        continue;
-      if (std::abs(RecCol.posZ()) >= cfgevtsel.cfgVtxCut)
-        continue;
-      if (cfgevtsel.isApplyBestCollIndex && RecCol.globalIndex() != mcCollision.bestCollisionIndex())
-        continue;
-      if (isUseCentEst) {
-        multiplicity = selColCent(RecCol);
-      } else {
-        auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
-        multiplicity = countNTracks(recTracksPart);
-      }
-      atLeastOne = true;
-    }
-    for (const auto& particle : mcparticles) {
-      if (!isGenPartSelected(particle) || std::abs(particle.eta()) > cfgtrksel.cfgEtaCut || particle.pt() < cfgtrksel.cfgPtCutMin || particle.pt() > cfgtrksel.cfgPtCutMax)
-        continue;
-      if (atLeastOne) {
-        auto pos = std::distance(speciesIds.begin(), std::find(speciesIds.begin(), speciesIds.end(), particle.pdgCode())) + 1;
-        histos.fill(HIST("hGenMCdndpt"), mcCollision.posZ(), multiplicity, particle.eta(), particle.pt(), pos);
-      }
-    }
-    for (const auto& RecCol : RecCols) {
-      if (!isEventSelected(RecCol))
-        continue;
-      if (std::abs(RecCol.posZ()) >= cfgevtsel.cfgVtxCut)
-        continue;
-      if (cfgevtsel.isApplyBestCollIndex && RecCol.globalIndex() != mcCollision.bestCollisionIndex())
-        continue;
-      auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
-      for (const auto& track : recTracksPart) {
-        if (!track.isGlobalTrack())
-          continue;
-        if (!myTrackFilter.IsSelected(track))
-          continue;
-        if (!track.has_mcParticle())
-          continue;
-        auto particle = track.mcParticle();
-        if (RecCol.mcCollisionId() != particle.mcCollisionId())
-          continue;
-        if (particle.isPhysicalPrimary()) {
-          auto pos = std::distance(speciesIds.begin(), std::find(speciesIds.begin(), speciesIds.end(), particle.pdgCode())) + 1;
-          histos.fill(HIST("hRecMCdndpt"), mcCollision.posZ(), multiplicity, particle.eta(), particle.pt(), pos);
-        }
-      }
-    }
-  }
-  void processMFTtrackEff(ColMCTrueTable::iterator const& mcCollision, ColMCRecTable const& RecCols,
-                          TrksMCRecTable const& RecTracks, MftTrkMCRecTable const&,
-                          aod::BestCollisionsFwd3d const& reassoMftTracks, aod::McParticles const& mcparticles)
-  {
-    if (std::abs(mcCollision.posZ()) >= cfgevtsel.cfgVtxCut) {
-      return;
-    }
-    auto multiplicity = 0;
-    bool atLeastOne = false;
-    for (const auto& RecCol : RecCols) {
-      if (!isEventSelected(RecCol))
-        continue;
-      if (std::abs(RecCol.posZ()) >= cfgevtsel.cfgVtxCut)
-        continue;
-      if (cfgevtsel.isApplyBestCollIndex && RecCol.globalIndex() != mcCollision.bestCollisionIndex())
-        continue;
-      if (isUseCentEst) {
-        multiplicity = selColCent(RecCol);
-      } else {
-        auto recTracksPart = RecTracks.sliceBy(perColMidtrack, RecCol.globalIndex());
-        multiplicity = countNTracks(recTracksPart);
-      }
-      atLeastOne = true;
-    }
-    for (const auto& particle : mcparticles) {
-      if (!isGenPartSelected(particle) || particle.eta() > cfgmfttrksel.cfgMftEtaMax || particle.eta() < cfgmfttrksel.cfgMftEtaMin || particle.pt() < cfgmfttrksel.cfgMftPtCutMin || particle.pt() > cfgmfttrksel.cfgMftPtCutMax)
-        continue;
-      if (atLeastOne)
-        histos.fill(HIST("hGenMCdndpt"), mcCollision.posZ(), multiplicity, particle.eta(), particle.pt(), 1.0);
-    }
-    for (const auto& RecCol : RecCols) {
-      if (!isEventSelected(RecCol))
-        continue;
-      if (std::abs(RecCol.posZ()) >= cfgevtsel.cfgVtxCut)
-        continue;
-      if (cfgevtsel.isApplyBestCollIndex && RecCol.globalIndex() != mcCollision.bestCollisionIndex())
-        continue;
-
-      auto recTracksPart = reassoMftTracks.sliceBy(perColMftTrack, RecCol.globalIndex());
-      for (const auto& reassoMftTrack : recTracksPart) {
-        if (!isMftBestTrackSelected(reassoMftTrack))
-          continue;
-        auto track = reassoMftTrack.mfttrack_as<MftTrkMCRecTable>();
-        if (!isMftTrackSelected(track)) {
-          continue;
-        }
-        if (cfgmfttrksel.cfgRequireCA && !track.isCA()) {
-          continue;
-        }
-        if (cfgmfttrksel.cfgRequireLTF && track.isCA()) {
-          continue;
-        }
-        if (!track.has_mcParticle())
-          continue;
-        auto particle = track.mcParticle();
-        if (RecCol.mcCollisionId() != particle.mcCollisionId())
-          continue;
-        if (particle.isPhysicalPrimary())
-          histos.fill(HIST("hRecMCdndpt"), mcCollision.posZ(), multiplicity, particle.eta(), particle.pt(), 1.0);
-      }
     }
   }
 
@@ -1117,11 +992,15 @@ struct LongrangeMaker {
       return false;
     }
     histos.fill(HIST("EventHist"), 14);
+    if (std::abs(col.posZ()) >= cfgevtsel.cfgVtxCut) {
+      return false;
+    }
+    histos.fill(HIST("EventHist"), 15);
     return true;
   }
 
   template <typename countTrk>
-  int countNTracks(countTrk const& tracks)
+  int countNTracks(countTrk const& tracks, float vz)
   {
     auto nTrk = 0;
     for (const auto& track : tracks) {
@@ -1132,7 +1011,10 @@ struct LongrangeMaker {
       if (track.pt() < cfgtrksel.cfgPtCutMin || track.pt() > cfgtrksel.cfgPtCutMult) {
         continue;
       }
-      nTrk++;
+      float trkeff = 1.0f;
+      if (cfgtrksel.applyEffCorr)
+        trkeff = getTrkEffCorr(vz, track.eta(), track.pt());
+      nTrk += 1.0 / trkeff;
     }
     return nTrk;
   }
@@ -1390,12 +1272,42 @@ struct LongrangeMaker {
     return true;
   }
 
+  void loadEffCorrection(uint64_t timestamp)
+  {
+    if (fLoadTrkEffCorr) {
+      return;
+    }
+    if (cfgtrksel.cfgEffccdbPath.value.empty() == false) {
+      hTrkEff = ccdb->getForTimeStamp<TH3D>(cfgtrksel.cfgEffccdbPath, timestamp);
+      if (hTrkEff == nullptr) {
+        LOGF(fatal, "Could not load efficiency histogram for trigger particles from %s", cfgtrksel.cfgEffccdbPath.value.c_str());
+      }
+      LOGF(info, "Loaded efficiency histogram from %s (%p)", cfgtrksel.cfgEffccdbPath.value.c_str(), (void*)hTrkEff);
+    }
+    fLoadTrkEffCorr = true;
+  }
+
+  float getTrkEffCorr(float posZ, float eta, float pt)
+  {
+    float eff = 1.;
+    if (hTrkEff) {
+      int zBin = hTrkEff->GetXaxis()->FindBin(posZ);
+      int etaBin = hTrkEff->GetYaxis()->FindBin(eta);
+      int ptBin = hTrkEff->GetZaxis()->FindBin(pt);
+      eff = hTrkEff->GetBinContent(zBin, etaBin, ptBin);
+    } else {
+      eff = 1.0;
+    }
+    if (eff < cfgtrksel.cfgLowEffCut)
+      eff = 1.0;
+
+    return eff;
+  }
+
   PROCESS_SWITCH(LongrangeMaker, processData, "process All collisions", false);
   PROCESS_SWITCH(LongrangeMaker, processUpc, "process UPC collisions", false);
   PROCESS_SWITCH(LongrangeMaker, processMCGen, "process MC generated collisions", false);
   PROCESS_SWITCH(LongrangeMaker, processMCRec, "process MC both gen and rec collisions", false);
-  PROCESS_SWITCH(LongrangeMaker, processTPCtrackEff, "process TPC track efficiency", false);
-  PROCESS_SWITCH(LongrangeMaker, processMFTtrackEff, "process MFT track efficiency", false);
 };
 
 WorkflowSpec defineDataProcessing(ConfigContext const& cfgc)
